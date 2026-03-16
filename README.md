@@ -237,20 +237,18 @@ End-to-end wall time for `ask()`, measured with `time.perf_counter()`. Reports a
 
 ### LLM-as-Judge Design and Limitations
 
-All three judge prompts (faithfulness, correctness, hallucination) use the same Llama 3.1 8B model that generated the answers. This introduces **self-serving bias**: a model evaluated by itself will tend to rate its own outputs favourably compared to evaluation by an independent model. 
+All three judge prompts (faithfulness, correctness, hallucination) use the same Llama 3.1 8B model that generated the answers (for cost reasons). This introduces **self-serving bias**: a model evaluated by itself will tend to rate its own outputs favourably compared to evaluation by an independent model. 
 
 For a production deployment, a better approach is:
 - Use a separate, stronger model as judge (GPT-4o-mini at ~$0.01 per evaluation run)
 - Supplement with human annotation on a stratified sample of 50-100 questions
 - Track judge-human agreement as a calibration metric
 
-For this project, the self-judge setup is retained for cost reasons. All reported judge scores should be interpreted as upper-bound estimates.
-
 ---
 
 ### Evaluation Results
 
-Run `python eval.py` or `python eval.py --quick` (10 questions) to populate this section.
+Run `python eval.py` (20 qns) or `python eval.py --quick` (10 qns) 
 
 ```
 Generated:
@@ -500,12 +498,12 @@ python ablations/run_all_ablations.py          # all studies, ~20 min
 
 **Self-judge bias in evaluation.** The LLM judge uses the same model as the generator. Reported faithfulness and correctness scores are likely inflated relative to independent evaluation 
 
-**Web scraping fragility.** The crawler relies on MOM's `data_template` meta tag to classify landing vs article pages. If MOM changes its CMS template naming, the crawler will silently fall back to the text-length heuristic, which is less reliable
-
 **No reranker.** Retrieved chunks are ordered by embedding cosine similarity. A cross-encoder reranker (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) would re-score query-chunk pairs jointly and improve Hit@1. The current Hit@1 < Hit@5 gap is evidence that the correct chunk is being retrieved but not always ranked first
 
 **No hybrid search.** Retrieval is dense-only. Sparse BM25 retrieval would complement it for exact-match queries involving specific legal provisions ("Section 38", "Part IV") that embedding similarity may not rank optimally
 
 **Scope router example set size.** The semantic router is built from 45 labelled examples. A larger or more diverse example set would improve performance on edge cases, particularly queries that are adjacent to employment law but out of scope (legal fees, housing loans, business registration)
+
+**Web scraping fragility.** The crawler relies on MOM's `data_template` meta tag to classify landing vs article pages. If MOM changes its CMS template naming, the crawler will silently fall back to the text-length heuristic, which is less reliable
 
 **Groq rate limits.** The free tier allows approximately 30 requests per minute. Evaluation and ablation scripts include `time.sleep()` calls to respect this limit. Running multiple scripts concurrently will trigger rate limit errors.
