@@ -15,10 +15,6 @@ The goal of this project is a chatbot that:
 - [Architecture Overview](#architecture-overview)
 - [Tech Stack](#tech-stack)
 - [Design choices](#design-decisions)
-  - [Why RAG and not Fine-Tuning](#why-rag-and-not-fine-tuning)
-  - [LLM: Llama 3.1 8B via Groq](#llm-llama-31-8b-via-groq)
-  - [Embeddings: all-MiniLM-L6-v2](#embeddings-all-minilm-l6-v2)
-  - [Vector Store: ChromaDB](#vector-store-chromadb)
   - [Chunking Strategy](#chunking-strategy)
   - [Retrieval: Top-K Selection](#retrieval-top-k-selection)
   - [Query Understanding Pipeline](#query-understanding-pipeline)
@@ -38,7 +34,7 @@ The goal of this project is a chatbot that:
   - [5. Out-of-Scope Detection Methods](#5-out-of-scope-detection-methods)
 - [Project Structure](#project-structure)
 - [Setup and Running](#setup-and-running)
-- [Known Limitations](#known-limitations)
+- [Limitations](#limitations)
 
 ---
 
@@ -261,25 +257,32 @@ Generated:
 Questions: 20 | LLM Judge: enabled
 
 Answer Quality
-  Semantic Similarity (cosine, answer vs ground truth): 
-  LLM Judge Faithfulness (grounded in context?): 
-  LLM Judge Correctness (matches ground truth?): 
-  Hallucination Rate: 
+  Semantic Similarity (cosine, answer vs ground truth): 0.7982
+  LLM Judge Faithfulness (grounded in context?): 0.8300
+  LLM Judge Correctness (matches ground truth?): 0.8700
+  Hallucination Rate: 10.0%
 
 Retrieval Quality
-  Hit Rate @ 1: 
-  Hit Rate @ 3:
-  Hit Rate @ 5:
+  Hit Rate @ 1: 70.0%
+  Hit Rate @ 3: 90.0%
+  Hit Rate @ 5: 95.0%
 
 Surface Metrics
-  Citation Rate:
-  Fallback Rate:
-  Out-of-Scope Block Rate:
+  Citation Rate: 100.0%
+  Fallback Rate: 0.0%
+  Out-of-Scope Block Rate: 5/5
 
 Latency
-  Average:
-  p50:
-  p95:
+  Average: 0.83s
+  p50: 0.68s
+  p95: 1.08s
+
+Out-of-scope guardrail test:
+  ✓ Blocked: What is the best recipe for chicken rice?
+  ✓ Blocked: What is the weather in Singapore today?
+  ✓ Blocked: Can you help me write a Python script?
+  ✓ Blocked: Who won the World Cup?
+  ✓ Blocked: What is the price of Bitcoin?
 ```
 
 ---
@@ -493,16 +496,16 @@ python ablations/run_all_ablations.py          # all studies, ~20 min
 
 ---
 
-## Known Limitations
+## Limitations
 
-**Self-judge bias in evaluation.** The LLM judge uses the same model as the generator. Reported faithfulness and correctness scores are likely inflated relative to independent evaluation. See [LLM-as-Judge Design and Limitations](#llm-as-judge-design-and-limitations).
+**Self-judge bias in evaluation.** The LLM judge uses the same model as the generator. Reported faithfulness and correctness scores are likely inflated relative to independent evaluation 
 
-**Web scraping fragility.** The crawler relies on MOM's `data_template` meta tag to classify landing vs article pages. If MOM changes its CMS template naming, the crawler will silently fall back to the text-length heuristic, which is less reliable.
+**Web scraping fragility.** The crawler relies on MOM's `data_template` meta tag to classify landing vs article pages. If MOM changes its CMS template naming, the crawler will silently fall back to the text-length heuristic, which is less reliable
 
-**No reranker.** Retrieved chunks are ordered by embedding cosine similarity. A cross-encoder reranker (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) would re-score query-chunk pairs jointly and improve Hit@1. The current Hit@1 < Hit@5 gap is evidence that the correct chunk is being retrieved but not always ranked first.
+**No reranker.** Retrieved chunks are ordered by embedding cosine similarity. A cross-encoder reranker (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) would re-score query-chunk pairs jointly and improve Hit@1. The current Hit@1 < Hit@5 gap is evidence that the correct chunk is being retrieved but not always ranked first
 
-**No hybrid search.** Retrieval is dense-only. Sparse BM25 retrieval would complement it for exact-match queries involving specific legal provisions ("Section 38", "Part IV") that embedding similarity may not rank optimally.
+**No hybrid search.** Retrieval is dense-only. Sparse BM25 retrieval would complement it for exact-match queries involving specific legal provisions ("Section 38", "Part IV") that embedding similarity may not rank optimally
 
-**Scope router example set size.** The semantic router is built from 45 labelled examples. A larger or more diverse example set would improve performance on edge cases, particularly queries that are adjacent to employment law but out of scope (legal fees, housing loans, business registration).
+**Scope router example set size.** The semantic router is built from 45 labelled examples. A larger or more diverse example set would improve performance on edge cases, particularly queries that are adjacent to employment law but out of scope (legal fees, housing loans, business registration)
 
 **Groq rate limits.** The free tier allows approximately 30 requests per minute. Evaluation and ablation scripts include `time.sleep()` calls to respect this limit. Running multiple scripts concurrently will trigger rate limit errors.
