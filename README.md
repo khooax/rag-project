@@ -5,8 +5,9 @@ A RAG chatbot that answers questions about Singapore employment and workplace ri
 The goal of this project is a chatbot that:
 
 1. Answers questions using only official sources (Ministry of Manpower, CPF Board, and Tripartite Advisory), citing the specific document/page every claim comes from
-3. Correctly refuses to answer off-topic questions rather than hallucinating
-4. Handles informal and colloquial queries, including Singlish and abbreviations
+2. Correctly refuses to answer off-topic questions rather than hallucinating
+3. Handles informal and colloquial queries, including Singlish and abbreviations
+4. Can handle anaphora resolution in multi-turn conversations
 
 ---
 
@@ -15,10 +16,6 @@ The goal of this project is a chatbot that:
 - [Architecture Overview](#architecture-overview)
 - [Tech Stack](#tech-stack)
 - [Design choices](#design-decisions)
-  - [Why RAG and not Fine-Tuning](#why-rag-and-not-fine-tuning)
-  - [LLM: Llama 3.1 8B via Groq](#llm-llama-31-8b-via-groq)
-  - [Embeddings: all-MiniLM-L6-v2](#embeddings-all-minilm-l6-v2)
-  - [Vector Store: ChromaDB](#vector-store-chromadb)
   - [Chunking Strategy](#chunking-strategy)
   - [Retrieval: Top-K Selection](#retrieval-top-k-selection)
   - [Query Understanding Pipeline](#query-understanding-pipeline)
@@ -38,29 +35,34 @@ The goal of this project is a chatbot that:
   - [5. Out-of-Scope Detection Methods](#5-out-of-scope-detection-methods)
 - [Project Structure](#project-structure)
 - [Setup and Running](#setup-and-running)
-- [Known Limitations](#known-limitations)
+- [Limitations](#limitations)
 
 ---
 
 ## Architecture Overview
 
+
 ```
 User query
     |
     v
+Anaphora resolution 
+    |-- Check for anaphora signals ('it', 'that', 'what if', 'what about')
+    |-- LLM rewriting to include previous context in query
+    v
 Query Understanding (query_understanding.py)
-    |-- Tier 1: Semantic similarity against labelled examples (~30ms)
-    |-- Tier 2: LLM judge for uncertain cases (~500ms, called rarely)
-    |-- Query rewriting: typo fix, Singlish normalisation, abbreviation expansion
+    |-- Tier 1: Rule based correction of common abbreviations/Singlish 
+    |-- Tier 2: LLM rewriting for remaining broken language (typos, foreign script, Singlish)
     v
 Out-of-scope? --> Return redirect response (no LLM call)
-    |
+    |-- Tier 1: Semantic similarity against labelled examples (~30ms)
+    |-- Tier 2: LLM judge for uncertain cases (~500ms, called rarely)
     v
-Retrieval (ChromaDB + all-MiniLM-L6-v2)
-    |-- Embed cleaned query
-    |-- Cosine similarity search, top-k=5 chunks
+Retrieval
+    |-- Embed cleaned query (all-MiniLM-L6-v2)
+    |-- Cosine similarity search, top-k=5 chunks (ChromaDB)
     v
-Generation (Llama 3.1 8B via Groq, temperature=0)
+Generation (Llama 3.1 70B via Groq)
     |-- Strict system prompt: only use retrieved context
     |-- Mandatory inline citations [Source: ...]
     |-- Explicit fallback: "I don't have enough information"
@@ -90,13 +92,11 @@ Notes:
 
 ### Chunking Strategy
 
-Documents are split using `RecursiveCharacterTextSplitter` with chunk size 500 tokens and overlap 100 tokens.
+Documents are split using `RecursiveCharacterTextSplitter` with chunk size 500 tokens and overlap 100 tokens. Splits on paragraph boundaries first, then sentence boundaries, then word boundaries. Prevents hard character splitting from cutting mid-sentence.
 
 **Why 500 tokens.** Employment Act provisions are structured as numbered rules with sub-clauses. At 256 tokens, these components split across chunks, leaving each chunk without sufficient context. At 1024 tokens, a single chunk may cover multiple unrelated provisions, reducing retrieval precision because the embedding represents a mixture of topics.
 
-**Why 100 tokens overlap.** Without overlap, a key sentence that falls exactly at a chunk boundary appears in neither adjacent chunk. An overlap of 100 tokens (approx 2-3 sentences) ensures that boundary content appears in both chunks, at the cost of modest index size increase.
-
-**Why RecursiveCharacterTextSplitter.** It splits on paragraph boundaries first, then sentence boundaries, then word boundaries. This respects the document structure of MOM web pages, which use `\n\n` to separate provisions. Hard character splitting would cut mid-sentence.
+**Why 100 tokens overlap** Without overlap, a key sentence that falls exactly at a chunk boundary appears in neither adjacent chunk. An overlap of 100 tokens (approx 2-3 sentences) ensures that boundary content appears in both chunks, at the cost of slight index size increase.
 
 The specific values (500, 100) were validated in the ablation study in section [Chunk Size](#2-chunk-size).
 
@@ -113,34 +113,38 @@ Large k introduces noise. When irrelevant chunks enter the context window, the L
 k=8 was validated in the ablation study in section [Top-K Retrieved Chunks](#3-top-k-retrieved-chunks).
 
 ---
+### Anaphora Resolution 
 
-### Query Understanding Pipeline
+Goal is to handle queries that are not self-contained and are continuations of previous questions (eg. "Can it be resolved?" where "it" refers to something mentioned previously). 
 
-`query_understanding.py` runs as a preprocessing stage before retrieval. It handles three classes of imperfect queries common in Singapore:
-
-**Stage 1 — Abbreviation expansion and Singlish normalisation (rule-based, instant)**
-
-Abbreviations: OT (overtime), MC (medical certificate/sick leave), WP (Work Permit) etc. These are expanded to their full forms before embedding as embedding models handle them poorly out of the box.
-
-Singlish and informal constructions: "boss never pay me salary", "kena retrench". These are normalised to standard English before embedding. 
-
-The rule set covers common patterns; residual informal language is handled by Stage 3.
-
-**Stage 3 — LLM rewriting (conditional, ~500ms)**
-
-Only triggered when Stages 1 and 2 leave detectable informality (heuristics: abbreviations, short vague queries, known Singlish markers, typos). The LLM rewrites the cleaned query into formal English suitable for legal document retrieval. Results are `lru_cache`d so repeated queries after rewriting are free.
-
-The ablation in section [Query Rewriting Robustness](#4-query-rewriting-robustness) quantifies the retrieval precision improvement for each category of imperfect query.
+Check for anaphora signals ("it", "this", "that", "what if", "what about", "how about"). If detected, get context (previous 3 user-assistant interactions) and pass query and contect into LLM to rewrite a self-contained query. 
 
 ---
 
-### Out-of-Scope Detection: Tiered Router
+### Query Understanding
+
+`query_understanding.py` runs as a preprocessing stage before retrieval. Goal is to handle broken language in the query so that the query can be handled well by the embedding model (things like Singlish, typos and abbreviations may be embedded poorly out of the box)
+
+**Tier 1 — Rule based: Common abbreviations and Singlish**
+
+Abbreviations: OT (overtime), MC (medical certificate/sick leave) etc are expanded to full forms
+Singlish and informal constructions: "boss never pay me salary", "kena retrench" are normalised to standard English
+
+**Tier 2 — LLM rewriting (conditional)**
+
+Only triggered when language is still broken after stage 1 (signals: foreign script, Singlish, typos (>4 consequtive consonants). LLM rewrites the cleaned query into formal English suitable for legal document retrieval. Results are `lru_cache`d so repeated queries after rewriting are free.
+
+Ablation in section [Query Rewriting Robustness](#4-query-rewriting-robustness) quantifies the retrieval precision improvement for each category of imperfect query.
+
+---
+
+### Out-of-Scope Detection
 
 `scope_router.py` implements a two-tier classifier to reject answering out of scope queries
 
-**Tier 1 — Semantic nearest-neighbour.** The query is embedded using the same MiniLM model already loaded for retrieval. Cosine similarity is computed against 25 labelled in-scope examples and 20 labelled out-of-scope examples, both embedded at startup. The decision uses a margin threshold: if `max_in_sim - max_out_sim > 0.05`, the query is classified confidently. Nearest-neighbour is used rather than centroid as the out-of-scope example set is deliberately diverse (recipes, coding, sports, finance), and the centroid of diverse examples is a poor representative.
+**Tier 1 — Semantic nearest-neighbour** The query is embedded using the same MiniLM model already loaded for retrieval. Cosine similarity is computed against 25 labelled in-scope examples and 20 labelled out-of-scope examples, both embedded at startup. The decision uses a margin threshold: if `max_in_sim - max_out_sim > 0.05`, the query is classified confidently. Nearest-neighbour is used rather than centroid as the out-of-scope example set is deliberately diverse (recipes, coding, sports, finance), and the centroid of diverse examples is a poor representative.
 
-**Tier 2 — LLM judge.** Used only when Tier 2 cannot produce a confident margin. The LLM judge uses a structured prompt with explicit in-scope and out-of-scope categories and returns JSON. If the judge fails, the query is passed through (over-blocking is treated as the more costly error for a citizen-facing system). 
+**Tier 2 — LLM judge** Used only when Tier 2 cannot produce a confident margin. The LLM judge uses a structured prompt with explicit in-scope and out-of-scope categories and returns JSON. If the judge fails, the query is passed through (over-blocking is treated as the more costly error for a citizen-facing system). 
 
 The ablation in section [Out-of-Scope Detection Methods](#5-out-of-scope-detection-methods) benchmarks all three approaches against a 40-query test set with labelled ground truth.
 
@@ -241,64 +245,63 @@ End-to-end wall time for `ask()`, measured with `time.perf_counter()`. Reports a
 
 ### LLM-as-Judge Design and Limitations
 
-All three judge prompts (faithfulness, correctness, hallucination) use the same Llama 3.1 8B model that generated the answers. This introduces **self-serving bias**: a model evaluated by itself will tend to rate its own outputs favourably compared to evaluation by an independent model. 
+All three judge prompts (faithfulness, correctness, hallucination) use the same Llama 3.1 8B model that generated the answers (for cost reasons). This introduces **self-serving bias**: a model evaluated by itself will tend to rate its own outputs favourably compared to evaluation by an independent model. 
 
 For a production deployment, a better approach is:
 - Use a separate, stronger model as judge (GPT-4o-mini at ~$0.01 per evaluation run)
 - Supplement with human annotation on a stratified sample of 50-100 questions
 - Track judge-human agreement as a calibration metric
 
-For this project, the self-judge setup is retained for cost reasons. All reported judge scores should be interpreted as upper-bound estimates.
-
 ---
 
 ### Evaluation Results
 
-Run `python eval.py` or `python eval.py --quick` (10 questions) to populate this section.
+Run `python eval.py` (20 qns) or `python eval.py --quick` (10 qns) 
 
 ```
 Generated:
 Questions: 20 | LLM Judge: enabled
 
 Answer Quality
-  Semantic Similarity (cosine, answer vs ground truth): 
-  LLM Judge Faithfulness (grounded in context?): 
-  LLM Judge Correctness (matches ground truth?): 
-  Hallucination Rate: 
+  Semantic Similarity (cosine, answer vs ground truth): 0.7982
+  LLM Judge Faithfulness (grounded in context?): 0.8300
+  LLM Judge Correctness (matches ground truth?): 0.8700
+  Hallucination Rate: 10.0%
 
 Retrieval Quality
-  Hit Rate @ 1: 
-  Hit Rate @ 3:
-  Hit Rate @ 5:
+  Hit Rate @ 1: 70.0%
+  Hit Rate @ 3: 90.0%
+  Hit Rate @ 5: 95.0%
 
 Surface Metrics
-  Citation Rate:
-  Fallback Rate:
-  Out-of-Scope Block Rate:
+  Citation Rate: 100.0%
+  Fallback Rate: 0.0%
+  Out-of-Scope Block Rate: 5/5
 
 Latency
-  Average:
-  p50:
-  p95:
+  Average: 0.83s
+  p50: 0.68s
+  p95: 1.08s
+
+Out-of-scope guardrail test:
+  ✓ Blocked: What is the best recipe for chicken rice?
+  ✓ Blocked: What is the weather in Singapore today?
+  ✓ Blocked: Can you help me write a Python script?
+  ✓ Blocked: Who won the World Cup?
+  ✓ Blocked: What is the price of Bitcoin?
 ```
 
 ---
 
-## Ablation Studies
-
-All ablation scripts are in `ablations/`. Run `python ablations/run_all_ablations.py` to execute all studies and generate a combined report at `ablations/ablation_report.txt`.
-
----
+## Ablation Studies 
 
 ### 1. RAG vs No-RAG Baseline
 
 **Script:** `ablations/ablation_rag_vs_baseline.py`
 
-**Question:** Does RAG add measurable value over a bare LLM prompt?
+**Why this matters:** Tests whether RAG adds value over a bare LLM prompt. If the bare LLM already answers correctly from its training data, RAG adds latency and complexity with no benefit. If RAG improves correctness or reduces hallucination, the overhead is justified.
 
 **Method:** The same 20 golden-set questions are answered under two conditions. Condition A is bare Llama 3.1 8B with no retrieved context. Condition B is the full RAG pipeline. Both are evaluated on the same correctness and hallucination metrics. Ground truth answers are human-verified against official MOM and CPF sources.
-
-**Why this matters:** This is the primary justification for the RAG architecture. If the bare LLM already answers correctly from its training data, RAG adds latency and complexity with no benefit. If RAG improves correctness or reduces hallucination, the overhead is justified.
 
 **Results:**
 
@@ -307,21 +310,16 @@ All ablation scripts are in `ablations/`. Run `python ablations/run_all_ablation
 | No RAG (bare LLM) | 75% | 15% | 0% | 0% |
 | RAG pipeline | 90% | 0% | 95% | 5% |
 
-Key finding: Rag improved correstness and decreased hallucination by 15%. 
-
-Note: RAG failed on 2 samples: 
-* How many weeks of maternity leave for a Singapore Citizen child?
-  * Expected: 16 weeks; Got refusal to answer - Retrieval gap
-* What are CPF contribution rates for employees aged 58?
-  * Expected: 34%; Got "For employees aged 58, the CPF contribution rate is 10%  [Source: CPF CONTRIBUTIONS - Age 60-65:  Employee 10%,] - table-row retrieval problem, chunker cut across the CPF age table so the 58-year-old row landed in a different chunk than what got retrieved
-
+Key finding: Rag improved correstness and decreased hallucination by 15%
+* This makes sense because the base model, Llama 70B, was trained with data up to 2023. Questions that touch on updated policies in 2024 and 2025 will be answered wrongly by that model. RAG is able to retrieve the most updated data from its dataset to give accurate answers, showing its benefit in situaitons when data is updated regularly.
+  
 ---
 
 ### 2. Chunk Size
 
 **Script:** `ablations/ablation_chunk_size.py`
 
-**Method:** Three separate ChromaDB instances are built from the same source documents at chunk sizes 256, 512, and 1024 tokens (overlap = chunk size / 10). Each is evaluated against the same 10-question retrieval test set using Precision@5: the fraction of top-5 retrieved chunks containing the `answer_key` string for each question.
+**Method:** Three  ChromaDB instances are built from the same source documents at chunk sizes 256, 512, and 1024 tokens (overlap = chunk size / 10). Each is evaluated against the same 10-question retrieval test set using Precision@5: the fraction of top-5 retrieved chunks containing the `answer_key` string for each question.
 
 **Why 500 was chosen:** Employment Act provisions read as complete units: premise clause, condition, numerical threshold, exception. At 256 tokens, these components split across chunks, removing context. At 1024, multiple unrelated provisions merge into one chunk, reducing retrieval precision because the chunk embedding represents a mixed topic.
 
@@ -409,7 +407,7 @@ Tiered received 4/36 LLM calls, and led to higher true positive and lower false 
   * How much does a lawyer charge per hour in Singapore?
   * What is the minimum salary to qualify for a bank loan?
 * Full tiered RN samples: 
-  * What is the minimum salary to qualify for a bank loan?
+  * What is the minimum salary to qualify for a bank loan? -- likely caused confusion because it mentions salary, hence is semantically close to in-scope queries
 
 ---
 
@@ -418,10 +416,10 @@ Tiered received 4/36 LLM calls, and led to higher true positive and lower false 
 ```
 sg-chatbot/
 |
-|-- app.py                    Streamlit chat interface
-|-- rag_pipeline.py           Core RAG chain: retrieval, generation, guardrails
+|-- app.py                    Streamlit interface
+|-- rag_pipeline.py           Core RAG chain: anaphora, out-of-scope testing, retrieval, generation, guardrails
 |-- ingest.py                 Web crawler, chunking, and vector DB construction
-|-- eval.py                   Comprehensive evaluation suite (10 metrics)
+|-- eval.py                   Evaluation 
 |-- query_understanding.py    Query preprocessing: typos, Singlish, abbreviations
 |-- scope_router.py           Tiered out-of-scope classifier (keyword / semantic / LLM)
 |
@@ -436,11 +434,11 @@ sg-chatbot/
 |
 |-- data/                     PDF documents (Employment Act, etc.)
 |-- db/                       ChromaDB vector index (generated by ingest.py)
-|-- eval/                     Evaluation output (generated by eval.py)
+|-- eval/                     Evaloutput (generated by eval.py)
 |
 |-- requirements.txt
 |-- .env.example
-|-- INSTRUCTIONS.md           Deployment guide for HuggingFace Spaces
+|-- INSTRUCTIONS.md            
 ```
 
 ---
@@ -448,7 +446,6 @@ sg-chatbot/
 ## Setup and Running
 
 **1. Install dependencies**
-
 ```bash
 pip install -r requirements.txt
 ```
@@ -478,31 +475,28 @@ streamlit run app.py
 **5. Run evaluation**
 
 ```bash
-python eval.py --quick    # 10 questions, ~8 min
-python eval.py            # 20 questions, ~25 min
-python eval.py --no-llm   # heuristics only, ~3 min, no API calls
+python eval.py --quick    # 10 questions
+python eval.py            # 20 questions
 ```
 
 **6. Run ablations**
 
 ```bash
-python ablations/ablation_scope_detection.py   # no LLM, fast
-python ablations/ablation_chunk_size.py        # no LLM, ~2 min
+python ablations/ablation_scope_detection.py   # no LLM
+python ablations/ablation_chunk_size.py        # no LLM 
 python ablations/run_all_ablations.py          # all studies, ~20 min
 ```
 
 ---
 
-## Known Limitations
+## Limitations
 
-**Self-judge bias in evaluation.** The LLM judge uses the same model as the generator. Reported faithfulness and correctness scores are likely inflated relative to independent evaluation. See [LLM-as-Judge Design and Limitations](#llm-as-judge-design-and-limitations).
+**Self-judge bias in evaluation:** The LLM judge uses the same model as the generator. Reported faithfulness and correctness scores are likely inflated relative to independent evaluation 
 
-**Web scraping fragility.** The crawler relies on MOM's `data_template` meta tag to classify landing vs article pages. If MOM changes its CMS template naming, the crawler will silently fall back to the text-length heuristic, which is less reliable.
+**No hybrid search:** Retrieval is dense-only. Sparse BM25 retrieval would complement it for exact-match queries involving specific legal provisions ("Section 38", "Part IV") that embedding similarity may not rank optimally
 
-**No reranker.** Retrieved chunks are ordered by embedding cosine similarity. A cross-encoder reranker (e.g. `cross-encoder/ms-marco-MiniLM-L-6-v2`) would re-score query-chunk pairs jointly and improve Hit@1. The current Hit@1 < Hit@5 gap is evidence that the correct chunk is being retrieved but not always ranked first.
+**Scope router example set size** The semantic router is built from 45 labelled examples. A larger or more diverse example set would improve performance on edge cases, particularly queries that are adjacent to employment law but out of scope (legal fees, housing loans, business registration)
 
-**No hybrid search.** Retrieval is dense-only. Sparse BM25 retrieval would complement it for exact-match queries involving specific legal provisions ("Section 38", "Part IV") that embedding similarity may not rank optimally.
+**Web scraping fragility** The crawler relies on MOM's `data_template` meta tag to classify landing vs article pages. If MOM changes its CMS template naming, the crawler will silently fall back to the text-length heuristic, which is less reliable
 
-**Scope router example set size.** The semantic router is built from 45 labelled examples. A larger or more diverse example set would improve performance on edge cases, particularly queries that are adjacent to employment law but out of scope (legal fees, housing loans, business registration).
-
-**Groq rate limits.** The free tier allows approximately 30 requests per minute. Evaluation and ablation scripts include `time.sleep()` calls to respect this limit. Running multiple scripts concurrently will trigger rate limit errors.
+**Groq rate limits:(** The free tier allows approximately 30 requests per minute. Evaluation and ablation scripts include `time.sleep()` calls to respect this limit. Running multiple scripts concurrently will trigger rate limit errors.
