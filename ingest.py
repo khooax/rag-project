@@ -51,12 +51,6 @@ ALLOWED_PREFIXES = [
     "https://www.mom.gov.sg/passes-and-permits",
 ]
 
-# Additional standalone pages to always include
-EXTRA_PAGES = [
-    "https://www.workright.sg/know-your-rights/",
-    "https://www.cpf.gov.sg/employer/employer-obligations/how-much-cpf-contributions-to-pay",
-]
-
 MAX_PAGES_TOTAL = 200   # safety cap across all seeds
 MIN_TEXT_LENGTH = 300   # minimum chars to count as real content (not just a nav grid)
 
@@ -436,19 +430,6 @@ def main():
     print(f"\n[3/4] Crawling MOM website (recursive BFS)...")
     web_docs = crawl_all(CRAWL_SEEDS)
     all_docs.extend(web_docs)
-
-    # Extra individual pages
-    print(f"\n  Scraping {len(EXTRA_PAGES)} extra pages...")
-    for url in EXTRA_PAGES:
-        soup = fetch(url)
-        if soup:
-            text = extract_text(soup)
-            if len(text) >= MIN_TEXT_LENGTH:
-                title_tag = soup.find("h1") or soup.find("title")
-                title = title_tag.get_text(strip=True) if title_tag else url
-                all_docs.append(Document(page_content=text, metadata={"source": title, "url": url}))
-                print(f"  ✓ {title}")
-        time.sleep(REQUEST_DELAY)
 
     print(f"\n  Total documents collected: {len(all_docs)}")
 

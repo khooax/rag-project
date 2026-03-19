@@ -1,16 +1,6 @@
 """
-rag_pipeline.py — Core RAG chain with guardrails and citation enforcement.
-Used by app.py (Streamlit UI) and eval.py (evaluation).
-
-Key improvements over v1:
-  - Stronger RAG prompt with explicit anti-hallucination rules for tables/numbers
-  - MMR retrieval (k=7, fetch_k=20) to surface diverse chunks and reduce redundancy
-  - Post-processing citation validator: forces fallback if answer cites nothing
-  - Numeric/table answer guard: detects likely hallucinated figures
-  - Asymmetric OOS thresholds (harder to block, easier to pass through)
-  - Paraphrase-diverse training examples so the classifier generalises
-  - Held-out _SCOPE_TEST_CASES + evaluate_scope_classifier() for regression testing
-  - Chroma telemetry fully suppressed before any import
+rag_pipeline.py — Core RAG chain 
+used by app.py (Streamlit UI) and eval.py (evaluation)
 """
 
 import os
@@ -271,11 +261,9 @@ def is_out_of_scope(query: str) -> bool:
     """
     Tiered scope classifier.
 
-    Tier 1 — keyword blocklist  (~0ms)
-    Tier 2 — semantic NN        (~30ms)
-    Tier 3 — LLM judge          (~500ms, only when Tier 2 is uncertain)
+    Tier 1 — semantic NN: margin>0.05 → pass, margin<-0.12 → block. uncertain band: pass to LLM 
+    Tier 2 — LLM judge:       
 
-    Asymmetric thresholds: margin > 0.05 → pass, margin < -0.12 → block.
     The wide uncertain band (-0.12 to +0.05) routes to the LLM judge.
     This is intentional: false positives (blocking valid employment questions)
     are worse than false negatives (passing one off-topic query).
@@ -293,11 +281,11 @@ def is_out_of_scope(query: str) -> bool:
 
     max_in  = float(np.max(cosine_similarity(q_vec, in_vecs)))
     max_out = float(np.max(cosine_similarity(q_vec, out_vecs)))
-    margin  = max_in - max_out   # positive = leans in-scope
+    margin  = max_in - max_out    
 
-    if margin > 0.05:    # clearly in-scope (was 0.08)
+    if margin > 0.05:     
         return False
-    if margin < -0.12:   # clearly out-of-scope (was -0.08, now harder to trigger)
+    if margin < -0.12:    
         return True
 
     # Tier 3: uncertain band → ask LLM
@@ -428,12 +416,12 @@ def load_qa_chain():
     )
 
 
-# ── Public aliases used by eval.py ─────────────────────────────────────────────
+# Public aliases used by eval.py ─────────────────────────────────────────────
 def get_llm():       return load_llm()
 def get_retriever(): return load_vectordb().as_retriever(search_kwargs={"k": TOP_K})
 
 
-# ── Post-processing guards ──────────────────────────────────────────────────────
+# Post-processing guards ──────────────────────────────────────────────────────
 
 def _has_citations(answer: str) -> bool:
     """Check that the answer contains at least one inline [Source: ...] citation."""
@@ -474,7 +462,7 @@ def ask(query: str) -> tuple[str, list[Document], bool, dict]:
     was_blocked=True means the query was rejected as out-of-scope.
     """
     # Step 1: preprocess — fix typos, Singlish, abbreviations
-    from query_understanding_new import preprocess_query_with_trace
+    from query_understanding import preprocess_query_with_trace
     trace = preprocess_query_with_trace(query)
     clean_query = trace["final"]
 

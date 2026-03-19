@@ -1,21 +1,15 @@
 """
-eval.py — Comprehensive evaluation suite for the SG Employment RAG Chatbot.
-
 Metrics measured:
-  1.  Semantic Similarity        — cosine similarity between answer and ground truth
-  2.  LLM-as-Judge Faithfulness  — does the answer contradict the retrieved context?
-  3.  LLM-as-Judge Correctness   — does the answer match the ground truth?
-  4.  Hallucination Rate         — fraction of answers with claims not in context
-  5.  Retrieval Hit Rate @K      — did any top-K chunk contain the answer?
-  6.  Source Attribution         — which source documents were retrieved?
+  1.  Semantic Similarity        — cosine similarity between ans and ground truth
+  2.  LLM-as-Judge Faithfulness  — does ans contradict retrieved context
+  3.  LLM-as-Judge Correctness   — does ans match ground truth?
+  4.  Hallucination Rate         — fraction of ans with claims not in context
+  5.  Retrieval Hit Rate @K      — did any top-K chunk contain answer
+  6.  Source Attribution         — which source documents were retrieved
   7.  Latency                    — end-to-end response time per query
-  8.  Fallback Rate              — when did the chatbot correctly say "I don't know"?
+  8.  Fallback Rate              — when did chatbot correctly say idk
   9.  Out-of-Scope Block Rate    — guardrail effectiveness
-  10. Citation Rate              — does the answer cite sources?
-
-Run: python eval.py
-     python eval.py --quick     (10 questions only)
-     python eval.py --no-llm    (skip LLM judge, use heuristics only)
+  10. Citation Rate              — does ans cite sources
 """
 
 import os, sys, json, time, argparse, re
@@ -30,68 +24,188 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 load_dotenv()
 
-# ── Golden test set ────────────────────────────────────────────────────────────
+#  Test set 
 GOLDEN_TEST_SET = [
-    {"question": "What is the minimum notice period if I have worked for less than 26 weeks?",
-     "ground_truth": "If you have been employed for less than 26 weeks, the minimum notice period is 1 day.",
-     "answer_key": "1 day", "source_hint": "employment act"},
-    {"question": "How many days of annual leave am I entitled to in my first year?",
-     "ground_truth": "In your first year of service, you are entitled to 7 days of annual leave under the Employment Act.",
-     "answer_key": "7 days", "source_hint": "annual leave"},
-    {"question": "What is the overtime pay rate in Singapore?",
-     "ground_truth": "Overtime pay is 1.5 times the hourly basic rate of pay for employees covered under Part IV of the Employment Act.",
-     "answer_key": "1.5", "source_hint": "overtime"},
-    {"question": "How many days of paid sick leave am I entitled to per year?",
-     "ground_truth": "You are entitled to 14 days of outpatient sick leave per year, and up to 60 days of hospitalisation leave.",
-     "answer_key": "14 days", "source_hint": "sick leave"},
-    {"question": "When must my employer pay my salary?",
-     "ground_truth": "Salary must be paid within 7 days after the end of the salary period. Overtime pay within 14 days.",
-     "answer_key": "7 days", "source_hint": "salary payment"},
-    {"question": "What are the CPF contribution rates for an employee aged 35?",
-     "ground_truth": "Employee contributes 20%, employer contributes 17%, total 37%.",
-     "answer_key": "37", "source_hint": "cpf"},
-    {"question": "How many weeks of maternity leave am I entitled to if my child is a Singapore Citizen?",
-     "ground_truth": "16 weeks of government-paid maternity leave for Singapore Citizen child.",
-     "answer_key": "16 weeks", "source_hint": "maternity"},
-    {"question": "Can my employer deduct money from my salary for poor performance?",
-     "ground_truth": "No. Employers cannot make unauthorised salary deductions.",
-     "answer_key": "unauthorised", "source_hint": "salary deduction"},
-    {"question": "What is the maximum number of overtime hours allowed per month?",
-     "ground_truth": "The maximum overtime is 72 hours per month.",
-     "answer_key": "72 hours", "source_hint": "overtime"},
-    {"question": "What is the minimum salary for an Employment Pass?",
-     "ground_truth": "The minimum fixed monthly salary for an Employment Pass is $5,000.",
-     "answer_key": "5,000", "source_hint": "employment pass"},
-    {"question": "How many public holidays are there in Singapore per year?",
-     "ground_truth": "There are 11 gazetted public holidays per year in Singapore.",
-     "answer_key": "11", "source_hint": "public holiday"},
-    {"question": "How many weeks of paternity leave am I entitled to?",
-     "ground_truth": "2 weeks of government-paid paternity leave for Singapore Citizen child.",
-     "answer_key": "2 weeks", "source_hint": "paternity"},
-    {"question": "What is the S Pass minimum salary?",
-     "ground_truth": "The minimum fixed monthly salary for an S Pass is $3,150.",
-     "answer_key": "3,150", "source_hint": "s pass"},
-    {"question": "Is my employer required to give me a payslip?",
-     "ground_truth": "Yes. Employers must issue itemised payslips within 3 working days of paying salary.",
-     "answer_key": "3 working days", "source_hint": "payslip"},
-    {"question": "What is the maximum number of working hours per week under the Employment Act?",
-     "ground_truth": "Maximum 44 ordinary hours per week for Part IV employees.",
-     "answer_key": "44", "source_hint": "working hours"},
-    {"question": "What is the CPF contribution rate for an employee aged 58?",
-     "ground_truth": "Employee 15%, employer 15%, total 30%.",
-     "answer_key": "30", "source_hint": "cpf"},
-    {"question": "How many days notice for someone with 3 years of service?",
-     "ground_truth": "For 2 to fewer than 5 years service, the minimum notice period is 2 weeks.",
-     "answer_key": "2 weeks", "source_hint": "notice period"},
-    {"question": "How do I file a wrongful dismissal claim?",
-     "ground_truth": "File within 1 month from last day of employment at Employment Claims Tribunals.",
-     "answer_key": "1 month", "source_hint": "wrongful dismissal"},
-    {"question": "How many days of annual leave in year 8 of employment?",
-     "ground_truth": "From the 8th year onwards, you are entitled to 14 days of annual leave.",
-     "answer_key": "14 days", "source_hint": "annual leave"},
-    {"question": "What is the CPF ordinary wage ceiling from 2024?",
-     "ground_truth": "The CPF ordinary wage ceiling is $6,800 per month from 2024.",
-     "answer_key": "6,800", "source_hint": "cpf"},
+  {
+    "question": "What is the minimum notice period if I have worked for less than 26 weeks and the contract is silent?",
+    "ground_truth": "Under Section 10 of the Employment Act, the default notice period for service of less than 26 weeks is 1 day.",
+    "answer_key": "1 day",
+    "source_hint": "Employment Act Section 10"
+  },
+  {
+    "question": "How many days of annual leave am I entitled to in my first year of service?",
+    "ground_truth": "According to the Employment Act, employees who have served at least 3 months are entitled to 7 days of annual leave for the first year of service.",
+    "answer_key": "7 days",
+    "source_hint": "MOM Annual Leave"
+  },
+  {
+    "question": "What is the overtime pay rate in Singapore for Part IV employees?",
+    "ground_truth": "Overtime pay must be at least 1.5 times the hourly basic rate of pay for employees covered under Part IV of the Employment Act.",
+    "answer_key": "1.5 times",
+    "source_hint": "Employment Act Section 38"
+  },
+  {
+    "question": "How many days of outpatient paid sick leave am I entitled to per year if I have served at least 6 months?",
+    "ground_truth": "You are entitled to 14 days of outpatient sick leave per year, and up to 60 days of hospitalisation leave (which includes the 14 days).",
+    "answer_key": "14 days",
+    "source_hint": "MOM Sick Leave"
+  },
+  {
+    "question": "When must my employer pay my salary?",
+    "ground_truth": "Salary must be paid within 7 days after the end of the salary period. Overtime pay must be paid within 14 days.",
+    "answer_key": "7 days",
+    "source_hint": "Employment Act Section 21"
+  },
+  {
+    "question": "How many weeks of maternity leave am I entitled to if my child is a Singapore Citizen?",
+    "ground_truth": "Eligible employees are entitled to 16 weeks of government-paid maternity leave for a Singapore Citizen child.",
+    "answer_key": "16 weeks",
+    "source_hint": "MOM Maternity Leave"
+  },
+  {
+    "question": "Can my employer deduct money from my salary for poor performance?",
+    "ground_truth": "No. Employers can only make deductions for specific reasons under the Act (like absence or damage to goods). Poor performance is not an authorized deduction.",
+    "answer_key": "No",
+    "source_hint": "Employment Act Section 27"
+  },
+  {
+    "question": "What is the maximum number of overtime hours allowed per month?",
+    "ground_truth": "The maximum number of overtime hours an employee can work in a month is 72 hours.",
+    "answer_key": "72 hours",
+    "source_hint": "MOM Hours of Work"
+  },
+  {
+    "question": "What is the minimum salary for a new Employment Pass (non-financial) in 2026?",
+    "ground_truth": "The minimum fixed monthly salary for a new Employment Pass is $5,600, increasing with age.",
+    "answer_key": "5,600",
+    "source_hint": "MOM EP Eligibility"
+  },
+  {
+    "question": "How many public holidays are there in Singapore per year?",
+    "ground_truth": "There are 11 gazetted public holidays per year in Singapore.",
+    "answer_key": "11",
+    "source_hint": "MOM Public Holidays"
+  },
+  {
+    "question": "How many weeks of paternity leave am I entitled to in 2026?",
+    "ground_truth": "For Singapore Citizen children born on or after 1 April 2025, fathers are entitled to 4 weeks of government-paid paternity leave.",
+    "answer_key": "4 weeks",
+    "source_hint": "MOM Paternity Leave"
+  },
+  {
+    "question": "What is the S Pass minimum salary for new applications in 2026?",
+    "ground_truth": "The minimum fixed monthly salary for an S Pass is $3,300 (non-financial sector).",
+    "answer_key": "3,300",
+    "source_hint": "MOM S Pass"
+  },
+  {
+    "question": "Is my employer required to give me a payslip?",
+    "ground_truth": "Yes. Employers must issue itemised payslips within 3 working days of paying salary.",
+    "answer_key": "3 working days",
+    "source_hint": "MOM Payslips"
+  },
+  {
+    "question": "What is the maximum number of working hours per week under Part IV of the Employment Act?",
+    "ground_truth": "The limit is 44 ordinary hours per week for employees covered under Part IV.",
+    "answer_key": "44",
+    "source_hint": "MOM Hours of Work"
+  },
+  {
+    "question": "How many days notice for someone with 3 years of service if the contract is silent?",
+    "ground_truth": "For 2 to fewer than 5 years of service, the statutory minimum notice period is 2 weeks.",
+    "answer_key": "2 weeks",
+    "source_hint": "Employment Act Section 10"
+  },
+  {
+    "question": "How do I file a wrongful dismissal claim?",
+    "ground_truth": "You must file a claim at TADM within 1 month from your last day of employment.",
+    "answer_key": "1 month",
+    "source_hint": "MOM Wrongful Dismissal"
+  },
+  {
+    "question": "How many days of annual leave in year 8 of employment?",
+    "ground_truth": "From the 8th year of service onwards, the statutory minimum is 14 days of annual leave.",
+    "answer_key": "14 days",
+    "source_hint": "MOM Annual Leave"
+  },
+  {
+    "question": "What is the 2026 statutory retirement age in Singapore?",
+    "ground_truth": "Effective 1 July 2026, the statutory retirement age is 64 years.",
+    "answer_key": "64",
+    "source_hint": "MOM Retirement"
+  },
+  {
+    "question": "What is the 2026 statutory re-employment age in Singapore?",
+    "ground_truth": "Effective 1 July 2026, the statutory re-employment age is 69 years.",
+    "answer_key": "69",
+    "source_hint": "MOM Re-employment"
+  },
+  {
+    "question": "Does Part IV of the Employment Act cover a manager earning $3,000?",
+    "ground_truth": "No. Managers and executives are not covered by Part IV of the Employment Act, regardless of salary.",
+    "answer_key": "No",
+    "source_hint": "MOM Employment Act Coverage"
+  },
+  {
+    "question": "How many days of sick leave can I take if I have worked for exactly 4 months?",
+    "ground_truth": "After 4 months of service, you are entitled to 8 days of outpatient sick leave and 30 days of hospitalisation leave.",
+    "answer_key": "8 days",
+    "source_hint": "MOM Sick Leave"
+  },
+  {
+    "question": "What is the Employment Assistance Payment (EAP) for a retrenched older worker in 2026?",
+    "ground_truth": "The EAP is 3.5 months' salary, with a minimum of $6,250 and a maximum of $14,750.",
+    "answer_key": "3.5 months",
+    "source_hint": "MOM Re-employment"
+  },
+  {
+    "question": "How long must a Manager or Executive serve to file for wrongful dismissal with notice?",
+    "ground_truth": "Managers and executives must have served at least 6 months to be eligible to file a claim for wrongful dismissal with notice.",
+    "answer_key": "6 months",
+    "source_hint": "MOM Wrongful Dismissal"
+  },
+  {
+    "question": "Can a job advertisement specify 'Singaporeans only' under Tripartite Guidelines?",
+    "ground_truth": "No. Under the Fair Consideration Framework and Tripartite Guidelines, advertisements should avoid nationality bias and be based on merit.",
+    "answer_key": "No",
+    "source_hint": "Tripartite Guidelines"
+  },
+  {
+    "question": "How soon must a workplace fatality be reported to MOM?",
+    "ground_truth": "Employers must notify MOM immediately (within 24 hours) of a workplace fatality.",
+    "answer_key": "immediately",
+    "source_hint": "MOM WSH Reporting"
+  },
+  {
+    "question": "What is the rest day entitlement for a workman covered under Part IV?",
+    "ground_truth": "An employee covered under Part IV is entitled to one rest day per week, which is one whole day (24 hours) without pay.",
+    "answer_key": "1 rest day",
+    "source_hint": "Employment Act Section 36"
+  },
+  {
+    "question": "Must an employer provide Key Employment Terms (KETs) in writing?",
+    "ground_truth": "Yes. Employers must provide written KETs to employees covered by the Employment Act within 14 days of the start of employment.",
+    "answer_key": "14 days",
+    "source_hint": "MOM Key Employment Terms"
+  },
+  {
+    "question": "What is the maximum time an employer has to respond to a formal Flexible Work Arrangement (FWA) request?",
+    "ground_truth": "Under the Tripartite Guidelines on Flexible Work Arrangement Requests, employers must provide a written decision within 2 months of receiving a formal request.",
+    "answer_key": "2 months",
+    "source_hint": "MOM Flexible Work Arrangements"
+  },
+  {
+    "question": "How many weeks of Shared Parental Leave (SPL) can parents share for a child born on or after 1 April 2026?",
+    "ground_truth": "For children born on or after 1 April 2026, eligible parents are entitled to 10 weeks of government-paid Shared Parental Leave.",
+    "answer_key": "10 weeks",
+    "source_hint": "MOM Shared Parental Leave"
+  },
+  {
+    "question": "What is the maximum medical expense claim limit for work injuries occurring from 1 November 2025 onwards?",
+    "ground_truth": "For work injuries occurring from 1 November 2025, the maximum medical expense claim limit under WICA is $53,000.",
+    "answer_key": "53,000",
+    "source_hint": "MOM WICA Limits"
+  }
 ]
 
 OUT_OF_SCOPE_TESTS = [
@@ -102,7 +216,7 @@ OUT_OF_SCOPE_TESTS = [
     "What is the price of Bitcoin?",
 ]
 
-# ── LLM Judge prompts ──────────────────────────────────────────────────────────
+#  LLM Judge prompts 
 
 FAITHFULNESS_PROMPT = """You are evaluating a RAG system. Judge if the ANSWER is faithful to the CONTEXT.
 Faithful = every claim in the answer is supported by the context.
@@ -125,7 +239,7 @@ ANSWER: {answer}
 Respond ONLY with JSON: {{"hallucinated": <true/false>, "confidence": <0.0-1.0>, "example": "<specific wrong claim or null>"}}"""
 
 
-# ── Metric functions ───────────────────────────────────────────────────────────
+#  Metric functions 
 
 def measure_latency(func, *args, **kwargs):
     start = time.perf_counter()
@@ -218,14 +332,14 @@ def llm_judge(question, answer, ground_truth, context_docs, judge_llm):
     }
 
 
-# ── Main evaluation ────────────────────────────────────────────────────────────
+#  Main eval
 
 def run_evaluation(quick=False, use_llm_judge=True):
     print("=" * 60)
     print("SG Employment Chatbot — Comprehensive Evaluation")
     print("=" * 60)
 
-    from rag_pipeline_new import ask, get_llm
+    from rag_pipeline import ask, get_llm
 
     test_set = GOLDEN_TEST_SET[:10] if quick else GOLDEN_TEST_SET
     print(f"Questions : {len(test_set)}")
@@ -273,7 +387,7 @@ def run_evaluation(quick=False, use_llm_judge=True):
             print(f"  Q{i+1:02d} BLOCKED by guardrail — check keywords")
             continue
 
-        # Core metrics
+        # core metrics
         sem_sim  = compute_semantic_similarity(answer, gt, embeddings)
         retrieval = check_retrieval_hit(sources, ak, sh)
         has_cit  = bool(re.search(r'\[Source:', answer, re.IGNORECASE))
@@ -291,7 +405,7 @@ def run_evaluation(quick=False, use_llm_judge=True):
                 "hallucinated": False, "halluc_conf": 0.0, "halluc_example": None,
             }
 
-        # Accumulate
+        # accumulate
         acc["sem_sim"].append(sem_sim)
         acc["faithfulness"].append(jscores["faithfulness"])
         acc["correctness"].append(jscores["correctness"])
@@ -412,7 +526,7 @@ def run_evaluation(quick=False, use_llm_judge=True):
     with open("eval/eval_report.json",  "w") as f: json.dump(results,  f, indent=2)
     with open("eval/eval_metrics.json", "w") as f: json.dump(summary, f, indent=2)
 
-    summary_txt = f"""SG Employment Chatbot — Evaluation Report
+    summary_txt = f"""SG Employment Chatbot — Eval 
 Generated : {results['timestamp']}
 Questions : {n} | LLM Judge: {use_llm_judge}
 {"="*55}
@@ -427,9 +541,6 @@ Out-of-Scope Block   : {summary['out_of_scope_block_rate']}
 Avg / p50 / p95 lat  : {summary['avg_latency_seconds']:.2f}s / {summary['p50_latency_seconds']:.2f}s / {summary['p95_latency_seconds']:.2f}s
 """
     with open("eval/eval_summary.txt", "w") as f: f.write(summary_txt)
-
-    print(f"\n✅ Saved: eval/eval_report.json  eval/eval_metrics.json  eval/eval_summary.txt\n")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

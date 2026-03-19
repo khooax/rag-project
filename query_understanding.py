@@ -1,32 +1,10 @@
 """
-query_understanding.py
-
-Drop-in query pre-processor for rag_pipeline.py.
-
-Handles:
+Query pre-processor for rag_pipeline.py, handling: 
   1. Typo correction + spelling normalisation
   2. Singlish / informal phrasing → formal English
   3. Abbreviation expansion (OT, MC, EP, EA, CPF, KET...)
   4. Vague query sharpening
   5. Code-switching (Malay/Chinese mixed with English)
-
-Usage in rag_pipeline.py:
-    from query_understanding import preprocess_query_with_trace
-
-    def ask(query: str):
-        trace = preprocess_query_with_trace(query)
-        clean_query = trace["final"]
-        ...
-
-Key improvements over v1:
-  - needs_llm_rewrite: removed the over-firing `has_abbrev` heuristic (matched
-    ANY 2-4 char uppercase token, triggering rewrites on clean queries).
-  - needs_llm_rewrite: `is_vague` now requires absence of known employment nouns,
-    not just short length (short but specific queries like "CPF rate 58" were
-    being rewritten unnecessarily, sometimes introducing drift).
-  - llm_rewrite: added keyword preservation guard — if the rewrite drops all
-    original content words, the rewrite is rejected and the original is kept.
-  - llm_rewrite: tighter length guard (2x, was 3x) to catch verbose rewrites.
 """
 
 import os
@@ -37,8 +15,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── Rule-based abbreviation expansion (instant, no API call) ──────────────────
-# Applied BEFORE the LLM rewrite so the LLM gets cleaner input.
+#  Rule-based 
 ABBREVIATIONS = {
     r"\bOT\b":      "overtime",
     r"\bMC\b":      "medical certificate / sick leave",
@@ -61,7 +38,6 @@ ABBREVIATIONS = {
     r"\bHR\b":      "Human Resources / employer",
 }
 
-# ── Singlish / colloquial → formal mappings (rule-based) ─────────────────────
 SINGLISH_MAP = {
     r"\blah\b":             "",
     r"\bleh\b":             "",
@@ -80,7 +56,7 @@ SINGLISH_MAP = {
     r"\bwhere got\b":       "is there",
 }
 
-# ── LLM rewrite prompt ────────────────────────────────────────────────────────
+#  LLM rewrite prompt 
 LLM_REWRITE_PROMPT = """You are a query normaliser for a Singapore employment law chatbot.
 
 Rewrite the user's query into a clear, formal English question suitable for searching an employment law database.
@@ -101,8 +77,7 @@ Rules:
 Original query: {query}
 Rewritten query:"""
 
-# Known employment nouns used to detect whether a short query is actually
-# specific (and therefore doesn't need an LLM rewrite).
+# known employment nouns used to detect whether short query is actually specific (and doesn't need an LLM rewrite).
 _EMPLOYMENT_NOUNS = {
     "leave", "salary", "pay", "wage", "notice", "resign", "resign",
     "dismiss", "dismissal", "cpf", "overtime", "sick", "annual",
@@ -130,9 +105,8 @@ def normalise_singlish(text: str) -> str:
 
 def needs_llm_rewrite(text: str) -> bool:
     """
-    Decide whether to call the LLM rewriter.
-    Conservative: only rewrite when there's clear evidence of informal or
-    broken language. Do NOT rewrite already-clean queries.
+    Decide whether to call the LLM rewriter
+    Only rewrite w clear evidence of informal/ broken language, DONT rewrite already-clean queries.
 
     v2 changes vs v1:
       - Removed `has_abbrev`: the old check fired on ANY 2-4 char uppercase
@@ -149,7 +123,7 @@ def needs_llm_rewrite(text: str) -> bool:
     words     = text.lower().split()
     word_set  = set(words)
 
-    # Crude but effective typo signals: unusual consonant clusters or vowel runs
+    # typo signals: unusual consonant clusters or vowel runs
     has_typos = bool(re.search(r'[bcdfghjklmnpqrstvwxyz]{4,}|[aeiou]{3,}', text.lower()))
 
     is_informal = any(w in text.lower() for w in [
@@ -158,10 +132,10 @@ def needs_llm_rewrite(text: str) -> bool:
         "sabo", "bo jio", "ok what",
     ])
 
-    # Mixed scripts remaining after rule-based pass
+    # mixed scripts remaining after rule-based pass
     has_foreign_script = bool(re.search(r'[\u4e00-\u9fff\u0600-\u06ff]', text))
 
-    # Short AND vague: lacks any known employment noun AND has no question mark
+    # short AND vague: lacks any known employment noun AND has no question mark
     is_vague = (
         len(words) <= 4
         and "?" not in text
@@ -175,7 +149,7 @@ def needs_llm_rewrite(text: str) -> bool:
 def llm_rewrite(query: str) -> str:
     """
     LLM-based query rewriting. Cached so repeated queries are free.
-    Falls back to the rule-cleaned query if:
+    falls back to the rule-cleaned query if:
       - The LLM call fails
       - The rewrite is empty
       - The rewrite is more than 2x longer (verbose hallucination)
@@ -195,11 +169,11 @@ def llm_rewrite(query: str) -> str:
         if not rewritten:
             return query
 
-        # Guard 1: reject if rewrite is more than 2x longer (likely hallucinated padding)
+        # guard 1: reject if rewrite is more than 2x longer (likely hallucinated padding)
         if len(rewritten.split()) > len(query.split()) * 2:
             return query
 
-        # Guard 2: reject if the rewrite lost all original content keywords
+        # guard 2: reject if the rewrite lost all original content keywords
         # (content words = tokens of 4+ characters, to skip stopwords)
         original_content = set(re.findall(r'\b\w{4,}\b', query.lower()))
         rewritten_content = set(re.findall(r'\b\w{4,}\b', rewritten.lower()))
@@ -214,12 +188,11 @@ def llm_rewrite(query: str) -> str:
 
 def preprocess_query(raw_query: str) -> str:
     """
-    Full preprocessing pipeline:
-      1. Rule-based abbreviation expansion
-      2. Rule-based Singlish normalisation
-      3. LLM rewrite (only if needed, cached)
+    full preprocessing pipeline:
+      1. rule-based abbreviation expansion + Singlish 
+      2. llm rewrite (only if needed, cached)
 
-    Returns the cleaned query ready for embedding + retrieval.
+    returns the cleaned query ready for embedding + retrieval.
     """
     step1 = expand_abbreviations(raw_query)
     step2 = normalise_singlish(step1)
@@ -229,8 +202,8 @@ def preprocess_query(raw_query: str) -> str:
 
 def preprocess_query_with_trace(raw_query: str) -> dict:
     """
-    Same as preprocess_query but returns all intermediate steps.
-    Useful for the Streamlit UI to show users what was interpreted.
+    same as preprocess_query but returns all intermediate steps, 
+    useful for the Streamlit UI to show users what was interpreted.
     """
     step1    = expand_abbreviations(raw_query)
     step2    = normalise_singlish(step1)

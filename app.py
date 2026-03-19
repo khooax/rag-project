@@ -3,9 +3,9 @@ app.py — Streamlit chatbot UI
 """
 
 import streamlit as st
-from rag_pipeline_new import ask, load_qa_chain
+from rag_pipeline import ask, load_qa_chain
 
-#  Page config 
+# Page config 
 st.set_page_config(
     page_title="SG Employment Rights Advisor",
     page_icon="⚖️",
@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS 
+# CSS 
 st.markdown("""
 <style>
     .main { background-color: #0e1117; }
@@ -78,7 +78,6 @@ with st.sidebar:
     st.markdown("""
     - **MOM Helpline:** 6438 5122
     - **TADM (Disputes):** 1800 221 9088
-    - **WorkRight:** workright.sg
     - **ECT (Tribunals):** employmentclaims.gov.sg
     """)
 
