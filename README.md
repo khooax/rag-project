@@ -1,4 +1,4 @@
-# Singapore Employment Rights Advisory Chatbot
+# SG Employment Rights Advisory Chatbot
 
 A RAG chatbot that answers questions about Singapore employment and workplace rights
 
@@ -82,10 +82,11 @@ Response + source documents + query trace
 | Frontend | Streamlit | Rapid UI prototyping
 | Query rewriter | Llama 3.1 8B via Groq | Cheaper model sufficient for rewriting
 
-Notes: 
-* **LLM**: Temperature=0 - Deterministic decoding for all generation calls, since employment law questions have correct answers and there is no value in stochastic sampling.
+Choices: 
 * **Embeddings**: `sentence-transformers/all-MiniLM-L6-v2` produces 384-dimensional embeddings and runs on CPU in approximately 10ms per query after the initial model load. For structured legal text with specific terminology ("notice period", "CPF ordinary wage ceiling"), smaller models perform competitively with larger ones because the domain vocabulary is highly distinctive. Embeddings do not need to capture subtle semantic nuance — they need to cluster "notice period" queries near "notice period" chunks, which MiniLM does reliably.
-* **Vector DB**: ChromaDB persists to a local directory (`./db`). The entire vector index is committed to the repo, so the HuggingFace Spaces deployment does not require a database server or network call for retrieval. In comparison with managed vector databases (Pinecone, Weaviate), which are appropriate for production systems requiring multi-writer updates/horizontal scaling/real-time indexing, ChromaDB's limitation is single-process access and no built-in hybrid search. For a read-only demonstration with fewer than 1000 chunks, these limitations are irrelevant. 
+* **Vector DB**: ChromaDB persists to a local directory (`./db`). The entire vector index is committed to the repo, so the HuggingFace Spaces deployment does not require a database server or network call for retrieval. In comparison with managed vector databases (Pinecone, Weaviate), which are appropriate for production systems requiring multi-writer updates/horizontal scaling/real-time indexing, ChromaDB's limitation is single-process access and no built-in hybrid search. For a read-only demonstration with fewer than 1000 chunks, these limitations are irrelevant.
+* **LLM**: Temperature=0 - Deterministic decoding for all generation calls, since employment law questions have correct answers and there is n value in stochastic sampling.
+
 
 ---
 ## Design choices
